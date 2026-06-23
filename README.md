@@ -227,7 +227,7 @@ ros2 run nav2_map_server map_saver_cli -f my_map
 | 组件 | 说明 |
 |---|---|
 | ybimu_node | YB-IMU 串口驱动节点，未包含在本仓库中 |
-| ydlidar_ros2 | YDLiDAR X3 ROS 2 驱动 |
+| ydlidar_ros2 或等效驱动 | YDLiDAR X3 ROS 2 驱动，未包含在本仓库中 |
 
 ---
 

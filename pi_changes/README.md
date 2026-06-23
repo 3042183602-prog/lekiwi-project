@@ -18,7 +18,7 @@
 ## 依赖（非公开）
 
 - **ybimu_node** — YB-IMU 串口驱动节点（未包含在此仓库中）
-- **ydlidar_ros2** — YDLiDAR X3 ROS 驱动
+- **YDLiDAR X3 ROS 驱动** — 未包含在此仓库中
 
 ## 启动方式
 
