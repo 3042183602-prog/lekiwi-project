@@ -1,0 +1,7 @@
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore editor backups
+*~
+*.swp
