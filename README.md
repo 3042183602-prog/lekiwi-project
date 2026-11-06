@@ -108,7 +108,7 @@ flowchart LR
     Global --> Local[局部规划与避障]
     Scan[实时雷达数据] --> Costmap[代价地图]
     Costmap --> Local
-    Local --> Cmd[/cmd_vel]
+    Local --> Cmd["/cmd_vel"]
     Cmd --> Base[LeKiwi 底盘]
 ```
 
