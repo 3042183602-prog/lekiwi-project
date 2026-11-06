@@ -1,252 +1,201 @@
-# LeKiwi Project
+# LeKiwi + SO-ARM101 移动操作机器人
 
-> 基于开源机器人平台 LeKiwi 的硬件适配与感知/导航系统集成。
+> 一套融合自主移动、环境建图、导航与机械臂模仿学习的移动操作机器人系统。
 
-本项目**不是从零开发**的机器人项目。LeKiwi 机器人底层基于 [adityakamath/lekiwi_ros2](https://github.com/adityakamath/lekiwi_ros2) 开源项目，我们在此基础上做了硬件替换、系统调优和上层感知导航栈的集成。
+本项目基于 LeKiwi 移动底盘与 LeRobot SO-ARM101 机械臂平台，重点完成了硬件适配、ROS 2 分布式架构、Cartographer 建图、Nav2 导航，以及机械臂模仿学习任务的完整落地。
 
----
+## 项目亮点
 
-## 背景
+- 将底层硬件控制与上层计算任务分离，构建了“树莓派 + 笔记本”的 ROS 2 分布式系统。
+- 面对低成本激光雷达引起的 SLAM 漂移和发散，完成问题定位、算法评估，并将建图方案由 SLAM Toolbox 切换为 Cartographer。
+- 打通从传感器采集、地图构建、路径规划到运动控制的完整 Nav2 导航链路。
+- 使用主从臂遥操作采集真实机器人数据，在双 RTX 4090 云端环境中训练 ACT 与 Diffusion Policy。
+- 成功完成地面捡物、低处取物和开门三个移动操作任务，并对两类模仿学习模型进行了实际对比。
 
-### 原始状态
+## 我的主要工作
 
-LeKiwi 底盘在原始状态下使用：
-- **IMU：** BNO055（通过 bno055_hardware_interface 接入 ros2_control）
-- **激光雷达：** LD19（10Hz，range_max=64m）
-- **计算：** 全部运行在树莓派上（含 EKF、SLAM）
+我主要负责移动底盘的 SLAM、ROS 2 节点搭建与系统集成，包括：
 
-### 我们做的主要变更
+- 设计树莓派与笔记本之间的 ROS 2 分布式计算架构。
+- 接入激光雷达、IMU 和底盘里程计，整理传感器话题与 TF 坐标关系。
+- 搭建并调试建图、定位、导航和底盘控制相关节点。
+- 分析 SLAM Toolbox 在实际硬件上的漂移与发散问题。
+- 评估并切换到 Cartographer，针对低精度雷达和室内环境完成参数调试。
+- 将 Cartographer 与 Nav2 对接，实现地图构建、路径规划和速度控制闭环。
+- 配合完成 SO-ARM101 的遥操作数据采集、云端训练、模型部署与任务验证。
 
-#### 硬件替换
+这个项目的重点不是简单地启动若干现成模块，而是在传感器精度有限、边缘计算资源受限、学习模型特性差异明显的条件下，完成系统拆分、问题定位、算法替换和软硬件联合调试。
 
-| 硬件 | 原来 | 现在 | 原因 |
-|---|---|---|---|
-| IMU | BNO055 | **YB-IMU** | 原传感器更换 |
-| 激光雷达 | LD19 | **YDLiDAR X3**（5Hz, 8m） | 原传感器更换 |
+## 系统架构
 
-#### 架构变更
+移动底盘采用分布式架构。树莓派靠近硬件，只处理传感器读取和底盘实时控制；计算量较大的建图、导航与决策任务运行在笔记本上。两端通过 ROS 2 DDS 通信。
 
-将感知与导航的计算任务从树莓派迁移到 PC，形成分布式架构：
+```mermaid
+flowchart LR
+    subgraph Robot[LeKiwi 移动底盘 / 树莓派]
+        Lidar[激光雷达]
+        IMU[IMU]
+        Odom[底盘里程计]
+        Driver[舵机与底盘控制]
+    end
 
-```
-树莓派 (仅硬件驱动)              PC (感知 + 决策 + 导航)
-                                  
-  base_controller ──/odom──────┐
-  ybimu_node ────/imu──────────┤── DDS ──→ EKF → /odometry/filtered + odom→base_footprint TF
-  ldlidar_node ──/scan─────────┘          ↓
-                                    rf2o → /laser_odom → x/y 位置修正
-                                             ↓
-                                       SLAM Toolbox → /map + map→odom TF
-                                             ↓
-                                       Nav2 → /cmd_vel ──DDS──→ 树莓派 base_controller 执行
-```
+    subgraph Laptop[笔记本 / 上层计算]
+        ROS[ROS 2 数据与 TF]
+        Cartographer[Cartographer\n建图与回环优化]
+        Nav2[Nav2\n规划与导航]
+    end
 
-这种架构的优点是：
-- 树莓派只负责实时控制（确定性任务），减轻负载
-- PC 处理计算密集型任务（SLAM、路径规划、模型推理）
-- 通过 ROS 2 DDS 通信（ROS_DOMAIN_ID=7），对开发者透明
-
----
-
-## 目录结构
-
-```
-lekiwi-project/
-│
-├── pi_changes/                 ← 树莓派侧：我们改过或新增的文件
-│   ├── base_complete.launch.py    一键启动（base + YbIMU + 激光雷达）
-│   ├── laser.yaml                 YDLiDAR X3 参数配置
-│   └── ybimu.launch.py            YB-IMU 启动文件（含话题 remap）
-│
-├── pc_stack/                   ← PC 侧：我们新建的感知导航配置文件
-│   ├── config/
-│   │   ├── slam.yaml               SLAM Toolbox 参数
-│   │   ├── nav2.yaml               Nav2 全栈参数
-│   │   └── robot_localization/
-│   │       └── ekf_rf2o.yaml       EKF 三源融合策略
-│   └── launch/
-│       ├── pc_slam.launch.py       轻量版：rf2o + EKF
-│       └── pc_full.launch.py       全栈版：rf2o + EKF + SLAM + Nav2 + Rviz2
-│
-└── README.md
+    Lidar -->|/scan| ROS
+    IMU -->|/imu| ROS
+    Odom -->|/odom| ROS
+    ROS --> Cartographer
+    Cartographer -->|地图与位姿| Nav2
+    Nav2 -->|/cmd_vel| Driver
 ```
 
----
+这种拆分带来了三个直接收益：
 
-## 各文件详细说明
+1. 树莓派专注硬件通信和实时控制，减少计算负载对底盘控制稳定性的影响。
+2. 笔记本能够为 Cartographer、Nav2 和后续学习算法提供更充足的计算资源。
+3. 各模块通过标准 ROS 2 话题连接，便于单独调试、替换和扩展。
 
-### Pi 侧（pi_changes/）
+## 移动底盘：从建图到导航
 
-#### `base_complete.launch.py` — **新增** 一键启动文件
+### 1. ROS 2 节点与数据链路
 
-原来需要两个终端分别跑：
-```bash
-# 终端1
-ros2 launch lekiwi_bringup lekiwi.launch.py config:=base use_ybimu:=true
+树莓派负责采集激光雷达、IMU 和底盘里程计数据，同时执行来自笔记本的速度指令。笔记本订阅传感器话题，维护坐标变换，并运行建图与导航节点。
 
-# 终端2
-ros2 launch lekiwi_bringup laser.launch.py
+整条控制链路为：
+
+```text
+雷达 / IMU / 里程计
+        ↓
+树莓派 ROS 2 节点
+        ↓ DDS
+笔记本：建图 / 定位 / Nav2
+        ↓ /cmd_vel
+树莓派底盘控制器
+        ↓
+舵机执行
 ```
 
-现在一个命令搞定：
-```bash
-ros2 launch lekiwi_bringup base_complete.launch.py
+### 2. SLAM Toolbox 遇到的问题
+
+项目早期使用 SLAM Toolbox。实际测试中，受激光雷达测量精度、扫描稳定性和环境特征等因素影响，扫描匹配结果不稳定，地图会逐渐出现漂移，严重时甚至发散。
+
+这类问题无法只靠反复修改单个参数解决。因此，我重新检查了传感器数据、TF 关系、里程计输入和建图链路，并对不同 SLAM 方案进行了实际测试。
+
+### 3. 切换到 Cartographer
+
+最终采用 Cartographer 作为建图方案。选择它的主要原因不是追求单帧扫描的极限精度，而是希望利用多传感器约束与回环优化，降低累计误差对全局地图的影响。
+
+切换过程中完成了：
+
+- 激光雷达、IMU 和里程计输入的统一。
+- ROS 2 话题、时间戳与 TF 坐标树检查。
+- 局部轨迹、子地图和回环检测相关参数调试。
+- 建图效果、闭环一致性和机器人运动稳定性的实机验证。
+
+在当前传感器配置和室内场景下，Cartographer 的整体效果更稳定，能够满足项目对地图精度和回环能力的需求。
+
+### 4. Nav2 导航
+
+地图构建完成后，使用 Nav2 完成自主导航。Nav2 在笔记本上运行，负责代价地图、路径规划、局部避障和速度指令生成；树莓派接收 `/cmd_vel` 并驱动底盘执行。
+
+```mermaid
+flowchart LR
+    Goal[目标点] --> Global[全局路径规划]
+    Global --> Local[局部规划与避障]
+    Scan[实时雷达数据] --> Costmap[代价地图]
+    Costmap --> Local
+    Local --> Cmd[/cmd_vel]
+    Cmd --> Base[LeKiwi 底盘]
 ```
 
-启动内容包括：base_controller（底盘控制）+ ybimu_node（IMU）+ ldlidar_node（激光雷达）。**注意：config:=base 模式下原本就不包含 EKF，所以这里也没有 EKF。**
+通过这种方式，建图、定位、规划与控制形成了完整闭环，同时保留了各模块独立替换和调试的能力。
 
-#### `laser.yaml` — **修改** YDLiDAR X3 参数
+## 机械臂：模仿学习与实机任务
 
-原始配置面向 LD19（10Hz, range_max=64.0），替换为 YDLiDAR X3 后的参数：
-- frequency: 5.0（X3 的实际扫描频率）
-- range_max: 8.0（X3 最大有效探测距离）
-- lidar_type: 1（对应 YDLiDAR X3）
+机械臂部分使用 SO-ARM101 主从臂进行遥操作。操作者控制主臂完成动作，从臂同步执行并记录观测与关节动作，由此获得真实机器人示范数据。
 
-#### `ybimu.launch.py` — **新增** YB-IMU 启动文件
+### 数据与训练流程
 
-关键设计点：通过 ROS 2 的 topic remapping 机制，将 ybimu_node 内部的 `/imu` 话题重映射为 `/imu_sensor_broadcaster/imu`。这是为了**保持与原有 EKF 配置的兼容性**——原来的 ekf.yaml 中 imu0 订阅的是 `/imu_sensor_broadcaster/imu`，替换 IMU 后无需修改 EKF 配置。
-
-**不包含的内容：** YB-IMU 的驱动节点（ybimu_node 可执行文件）未包含在此仓库中。
-
-### PC 侧（pc_stack/）
-
-#### `config/robot_localization/ekf_rf2o.yaml` — **新增** EKF 融合配置
-
-这是整个感知系统的核心。EKF（扩展卡尔曼滤波器）融合三个传感器源：
-
-| 源 | 话题 | 融合分量 | 为什么 |
-|---|---|---|---|
-| odom0 | `/base_controller/odom` | **vx, vy**（线速度） | 轮式里程计短时精度高，但位置会漂移，所以只取速度 |
-| odom1 | `/laser_odom`（rf2o） | **x, y**（位置） | 激光匹配提供无漂移的绝对位置修正 |
-| imu0 | `/imu_sensor_broadcaster/imu` | **roll/pitch/yaw + 角速度** | IMU 提供绝对姿态基准，不融合线加速度避免振动噪声 |
-
-特别注意：rf2o 输出的 yaw 航向角**没有**融合进 EKF，因为 IMU 有磁力计校正的绝对航向更稳定。rf2o 只用它的 x/y 位置来修正轮子里程计的漂移。
-
-输出：`/odometry/filtered` 话题（50Hz）+ `odom → base_footprint` TF 变换。
-
-#### `config/slam.yaml` — **新增** SLAM Toolbox 参数
-
-用于在线异步建图模式（online_async）。针对 YDLiDAR X3（5Hz, 8m 量程）和室内场景做了参数整定：
-- resolution: 0.05（5cm 栅格，适合室内导航）
-- map_update_rate: 2.0
-- 扫描匹配参数放宽，兼容 5Hz 低帧率
-
-#### `config/nav2.yaml` — **新增** Nav2 全栈参数
-
-包含：controller_server、planner_server、behavior_server、bt_navigator、velocity_smoother、collision_monitor 等所有 Nav2 节点的参数。
-
-主要适配点：
-- 全向底盘（支持 vx, vy, wz 三自由度运动）
-- MPPI 控制器参数
-- costmap 适配 YDLiDAR X3 的检测范围
-
-#### `launch/pc_slam.launch.py` — **新增** 轻量测试版启动
-
-只启动 rf2o + EKF，适合先验证传感器和融合是否正常工作。
-
-#### `launch/pc_full.launch.py` — **新增** 全栈启动（推荐）
-
-通过 `mode:=slam` 或 `mode:=nav` 参数一键切换建图/导航模式：
-- `mode:=slam` → rf2o + EKF + SLAM Toolbox + Rviz2
-- `mode:=nav` → rf2o + EKF + SLAM Toolbox + Nav2 全套 + Rviz2
-
-两种模式下 slam_toolbox 都运行——slam 模式用于建图，nav 模式中 slam_toolbox 同时承担定位功能（替代 AMCL）。
-
----
-
-## TF 坐标树
-
-TF 树是分布式系统中保证数据一致性的关键：
-
-| TF 变换 | 发布者 | 位置 | 说明 |
-|---|---|---|---|
-| map → odom | SLAM Toolbox | **PC** | 回环检测修正的全局漂移 |
-| odom → base_footprint | **EKF** | **PC** | 三源融合后的机器人位姿 |
-| base_footprint → base_link → laser_frame | robot_state_publisher | **树莓派** | URDF 定义的静态变换 |
-
-三者**互不冲突**，各司其职：EKF 只发布 odom→base_footprint，SLAM Toolbox 只修正 map→odom。
-
----
-
-## 启动方式
-
-### 前提条件
-
-两台机器在同一网络，ROS_DOMAIN_ID 一致：
-
-```bash
-export ROS_DOMAIN_ID=7
+```mermaid
+flowchart LR
+    Teleop[主从臂遥操作] --> Collect[采集示范数据]
+    Collect --> Upload[上传云端计算机]
+    Upload --> Train[双 RTX 4090 训练]
+    Train --> ACT[ACT]
+    Train --> Diffusion[Diffusion Policy]
+    ACT --> Deploy[部署与实机测试]
+    Diffusion --> Deploy
 ```
 
-### 树莓派 — 硬件驱动
+完整流程包括：
 
-```bash
-source ~/lekiwi_ws/install/setup.bash
-export ROS_DOMAIN_ID=7
-ros2 launch lekiwi_bringup base_complete.launch.py
-```
+1. 设计并重复执行目标任务，采集质量稳定的示范轨迹。
+2. 检查数据完整性，将数据集上传至云端计算机。
+3. 配置 LeRobot 训练环境与双 RTX 4090 计算资源。
+4. 根据数据规模和任务表现调整学习率等训练参数。
+5. 分别训练 ACT 与 Diffusion Policy，并将模型部署回真实机械臂测试。
 
-启动后验证：
-```bash
-ros2 topic list | grep -E "/scan|/odom|/imu_sensor"
-```
+### 完成的任务
 
-### PC — 感知 + 导航
-
-```bash
-source ~/lekiwi_pc_ws/install/setup.bash
-export ROS_DOMAIN_ID=7
-
-# 建图
-ros2 launch lekiwi_navigation pc_full.launch.py mode:=slam
-
-# 或导航（需事先建好地图）
-ros2 launch lekiwi_navigation pc_full.launch.py mode:=nav
-```
-
-### 地图保存
-
-```bash
-ros2 run nav2_map_server map_saver_cli -f my_map
-```
-
----
-
-## 依赖的上游项目
-
-| 项目 | 链接 | 在本项目中的角色 |
+| 任务 | 主要挑战 | 最终结果 |
 |---|---|---|
-| lekiwi_ros2 | https://github.com/adityakamath/lekiwi_ros2 | 基础 ROS 2 包（bringup/control/description/navigation） |
-| rf2o_laser_odometry | https://github.com/MAPIRlab/rf2o_laser_odometry | 激光里程计算法（需使用 ros2 分支，apt 无二进制包需源码编译） |
-| slam_toolbox | ROS 2 官方包 | 建图与定位 |
-| Nav2 | ROS 2 官方包 | 自主导航栈 |
-| robot_localization | ROS 2 官方包 | EKF 传感器融合 |
+| 地面捡物 | 目标位置低、抓取空间受限 | 成功完成抓取与抬升 |
+| 低处取物 | 需要稳定到达目标并完成精细抓取 | 成功完成取物动作 |
+| 开门 | 动作过程长，包含接近、操作和持续运动 | 成功完成完整动作流程 |
 
-### 非公开依赖
+## ACT 与 Diffusion Policy 对比
 
-| 组件 | 说明 |
+两种模型都能学习示范动作，但实机表现存在明显差异。
+
+| 对比项 | ACT | Diffusion Policy |
+|---|---|---|
+| 推理体验 | 动作响应相对直接 | 推理速度较慢 |
+| 环境变化适应性 | 对位置和环境变化较敏感 | 对小范围环境变化更稳健 |
+| 实机表现 | 在接近训练分布时效果较好 | 整体成功率和泛化表现更好 |
+| 主要问题 | 环境稍有变化就可能抓取失败 | 推理延迟会影响动作实时性 |
+
+ACT 的优势是结构直接，但对训练数据分布依赖较强。当物体位置、姿态或环境发生变化时，抓取成功率会明显下降。Diffusion Policy 对变化的适应能力更强，实际任务效果更好，但推理速度较慢，需要在模型效果与实时性之间权衡。
+
+## 最终成果
+
+本项目最终完成了两个相互连接的机器人能力闭环：
+
+- **移动能力闭环：** 传感器采集 → ROS 2 数据传输 → Cartographer 建图与回环 → Nav2 路径规划 → 底盘执行。
+- **操作能力闭环：** 主从臂遥操作 → 数据采集 → 云端训练 → 模型部署 → 真实机械臂执行。
+
+项目不仅验证了移动底盘与机械臂各自的功能，也积累了以下完整工程经验：
+
+- ROS 2 分布式系统与节点集成。
+- 多传感器数据、时间同步与 TF 调试。
+- SLAM 漂移和发散问题的定位与算法替换。
+- Cartographer 与 Nav2 的建图导航链路搭建。
+- 真实机器人示范数据采集与质量控制。
+- 双 GPU 训练环境配置、超参数调整和模型部署。
+- ACT 与 Diffusion Policy 的实机评估和技术取舍。
+
+## 技术栈
+
+| 类别 | 技术与硬件 |
 |---|---|
-| ybimu_node | YB-IMU 串口驱动节点，未包含在本仓库中 |
-| ydlidar_ros2 或等效驱动 | YDLiDAR X3 ROS 2 驱动，未包含在本仓库中 |
+| 移动平台 | LeKiwi、树莓派、激光雷达、IMU、舵机底盘 |
+| 机器人中间件 | ROS 2、DDS、TF2 |
+| 建图与导航 | Cartographer、Nav2 |
+| 机械臂 | LeRobot、SO-ARM101 主从臂 |
+| 模仿学习 | ACT、Diffusion Policy |
+| 训练资源 | 云端双 NVIDIA RTX 4090 |
+
+## 后续改进
+
+- 进一步标定雷达、IMU 与底盘里程计，提升位姿估计稳定性。
+- 优化 Cartographer 参数和异常传感器数据过滤策略。
+- 完善移动底盘与机械臂之间的任务级协同，实现“自主导航到目标位置后完成操作”。
+- 扩充不同光照、物体位置和场景条件下的数据，提高策略泛化能力。
+- 研究模型压缩、推理加速或更轻量的策略网络，改善 Diffusion Policy 的实时性。
 
 ---
 
-## 本仓库包含 vs 不包含
-
-### 包含（我们写的/改的，全部开源可共享）
-
-- `base_complete.launch.py` — 一键启动文件（~30 行 Python）
-- `laser.yaml` — YDLiDAR X3 参数配置（~20 行 YAML）
-- `ybimu.launch.py` — YB-IMU 启动文件（~50 行 Python）
-- `ekf_rf2o.yaml` — EKF 三源融合配置（~80 行 YAML）
-- `slam.yaml` — SLAM Toolbox 参数（~60 行 YAML）
-- `nav2.yaml` — Nav2 全栈参数（~350 行 YAML）
-- `pc_slam.launch.py` — PC 侧轻量启动文件（~50 行 Python）
-- `pc_full.launch.py` — PC 侧全栈启动文件（~120 行 Python）
-
-### 不包含（上游项目或非公开代码）
-
-- lekiwi_ros2 完整项目（见上游链接）
-- rf2o_laser_odometry 源码（见上游链接）
-- ybimu_node 驱动（非公开，请联系作者）
-- ydlidar_ros2 驱动（需自行安装）
+这个项目让我完整经历了从硬件接入、ROS 2 系统设计、SLAM 问题定位和导航集成，到示范数据采集、云端训练与真实机器人部署的全过程。相比单独跑通某个算法，更重要的成果是能够根据真实硬件暴露的问题做出技术判断，并把多个机器人模块整合成可以工作的系统。
